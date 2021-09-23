@@ -71,6 +71,8 @@ type txPool interface {
 	// SubscribeNewTxsEvent should return an event subscription of
 	// NewTxsEvent and send events to the given channel.
 	SubscribeNewTxsEvent(chan<- core.NewTxsEvent) event.Subscription
+
+	SubscribeNewTxsEventRaw(chan<- core.NewTxsEvent) event.Subscription
 }
 
 // handlerConfig is the collection of initialization parameters to create a full

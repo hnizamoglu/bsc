@@ -52,6 +52,7 @@ const (
 	PendingTransactionsSubscription
 	// BlocksSubscription queries hashes for blocks that are imported
 	BlocksSubscription
+	PendingTransactionsRawSubscription
 	// LastSubscription keeps track of the last index
 	LastIndexSubscription
 )
@@ -76,6 +77,7 @@ type subscription struct {
 	logs      chan []*types.Log
 	hashes    chan []common.Hash
 	headers   chan *types.Header
+	transactions chan []*types.Transaction
 	installed chan struct{} // closed when the filter is installed
 	err       chan error    // closed when the filter is uninstalled
 }
@@ -89,6 +91,7 @@ type EventSystem struct {
 
 	// Subscriptions
 	txsSub         event.Subscription // Subscription for new transaction event
+	txsRawSub	   event.Subscription
 	logsSub        event.Subscription // Subscription for new log event
 	rmLogsSub      event.Subscription // Subscription for removed log event
 	pendingLogsSub event.Subscription // Subscription for pending log event
@@ -98,6 +101,7 @@ type EventSystem struct {
 	install       chan *subscription         // install filter for event notification
 	uninstall     chan *subscription         // remove filter for event notification
 	txsCh         chan core.NewTxsEvent      // Channel to receive new transactions event
+	txsRawCh	  chan core.NewTxsEvent
 	logsCh        chan []*types.Log          // Channel to receive new log event
 	pendingLogsCh chan []*types.Log          // Channel to receive new log event
 	rmLogsCh      chan core.RemovedLogsEvent // Channel to receive removed log event
@@ -117,6 +121,7 @@ func NewEventSystem(backend Backend, lightMode bool) *EventSystem {
 		install:       make(chan *subscription),
 		uninstall:     make(chan *subscription),
 		txsCh:         make(chan core.NewTxsEvent, txChanSize),
+		txsRawCh:      make(chan core.NewTxsEvent, txChanSize),
 		logsCh:        make(chan []*types.Log, logsChanSize),
 		rmLogsCh:      make(chan core.RemovedLogsEvent, rmLogsChanSize),
 		pendingLogsCh: make(chan []*types.Log, logsChanSize),
@@ -125,6 +130,7 @@ func NewEventSystem(backend Backend, lightMode bool) *EventSystem {
 
 	// Subscribe events
 	m.txsSub = m.backend.SubscribeNewTxsEvent(m.txsCh)
+	m.txsRawSub = m.backend.SubscribeNewTxsEvent(m.txsRawCh)
 	m.logsSub = m.backend.SubscribeLogsEvent(m.logsCh)
 	m.rmLogsSub = m.backend.SubscribeRemovedLogsEvent(m.rmLogsCh)
 	m.chainSub = m.backend.SubscribeChainEvent(m.chainCh)
@@ -299,6 +305,22 @@ func (es *EventSystem) SubscribePendingTxs(hashes chan []common.Hash) *Subscript
 		created:   time.Now(),
 		logs:      make(chan []*types.Log),
 		hashes:    hashes,
+		transactions: make(chan []*types.Transaction),
+		headers:   make(chan *types.Header),
+		installed: make(chan struct{}),
+		err:       make(chan error),
+	}
+	return es.subscribe(sub)
+}
+
+func (es *EventSystem) SubscribePendingTxsRaw(transactions chan []*types.Transaction) *Subscription {
+	sub := &subscription{
+		id:        rpc.NewID(),
+		typ:       PendingTransactionsRawSubscription,
+		created:   time.Now(),
+		logs:      make(chan []*types.Log),
+		hashes:    make(chan []common.Hash),
+		transactions: transactions,
 		headers:   make(chan *types.Header),
 		installed: make(chan struct{}),
 		err:       make(chan error),
@@ -348,6 +370,12 @@ func (es *EventSystem) handleTxsEvent(filters filterIndex, ev core.NewTxsEvent) 
 	}
 	for _, f := range filters[PendingTransactionsSubscription] {
 		f.hashes <- hashes
+	}
+}
+
+func (es *EventSystem) handleTxsRawEvent(filters filterIndex, ev core.NewTxsEvent) {
+	for _, f := range filters[PendingTransactionsRawSubscription] {
+		f.transactions <- ev.Txs
 	}
 }
 
@@ -444,6 +472,7 @@ func (es *EventSystem) eventLoop() {
 	// Ensure all subscriptions get cleaned up
 	defer func() {
 		es.txsSub.Unsubscribe()
+		es.txsRawSub.Unsubscribe()
 		es.logsSub.Unsubscribe()
 		es.rmLogsSub.Unsubscribe()
 		es.pendingLogsSub.Unsubscribe()
@@ -459,6 +488,8 @@ func (es *EventSystem) eventLoop() {
 		select {
 		case ev := <-es.txsCh:
 			es.handleTxsEvent(index, ev)
+		case ev := <- es.txsRawCh:
+			es.handleTxsRawEvent(index,ev)
 		case ev := <-es.logsCh:
 			es.handleLogs(index, ev)
 		case ev := <-es.rmLogsCh:
@@ -490,6 +521,8 @@ func (es *EventSystem) eventLoop() {
 
 		// System stopped
 		case <-es.txsSub.Err():
+			return
+		case <- es.txsRawSub.Err():
 			return
 		case <-es.logsSub.Err():
 			return

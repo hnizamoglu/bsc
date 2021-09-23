@@ -271,6 +271,10 @@ func (b *EthAPIBackend) SubscribeNewTxsEvent(ch chan<- core.NewTxsEvent) event.S
 	return b.eth.TxPool().SubscribeNewTxsEvent(ch)
 }
 
+func (b *EthAPIBackend) SubscribeNewTxsRawEvent(ch chan<- core.NewTxsEvent) event.Subscription {
+	return b.eth.TxPool().SubscribeNewTxsEventRaw(ch)
+}
+
 func (b *EthAPIBackend) Downloader() *downloader.Downloader {
 	return b.eth.Downloader()
 }
