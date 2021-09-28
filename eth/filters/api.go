@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"math/big"
 	"sync"
 	"time"
@@ -184,18 +185,18 @@ func (api *PublicFilterAPI) NewPendingTransactionsRaw(ctx context.Context) (*rpc
 	}
 
 	rpcSub := notifier.CreateSubscription()
-
 	go func() {
-		txHashes := make(chan []*types.Transaction, 128)
-		pendingTxSub := api.events.SubscribePendingTxsRaw(txHashes)
+		txs := make(chan []*types.Transaction, 128)
+		pendingTxSub := api.events.SubscribePendingTxsRaw(txs)
 
 		for {
 			select {
-			case hashes := <-txHashes:
+			case hashes := <-txs:
 				// To keep the original behaviour, send a single tx hash in one notification.
 				// TODO(rjl493456442) Send a batch of tx hashes in one notification
-				for _, h := range hashes {
-					notifier.Notify(rpcSub.ID, h)
+				for _, tx := range hashes {
+					rpcTx := ethapi.NewRPCTransaction(tx,common.Hash{},0,0)
+					notifier.Notify(rpcSub.ID, rpcTx)
 				}
 			case <-rpcSub.Err():
 				pendingTxSub.Unsubscribe()
