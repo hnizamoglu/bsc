@@ -30,7 +30,7 @@ type prunedfreezer struct {
 }
 
 // newNoDataFreezer creates a chain freezer that deletes data enough ‘old’.
-func newPrunedFreezer(datadir string, db ethdb.KeyValueStore) (*prunedfreezer, error) {
+func newPrunedFreezer(datadir string, db ethdb.KeyValueStore, offset uint64) (*prunedfreezer, error) {
 	if info, err := os.Lstat(datadir); !os.IsNotExist(err) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			log.Warn("Symbolic link ancient database is not supported", "path", datadir)
@@ -45,6 +45,7 @@ func newPrunedFreezer(datadir string, db ethdb.KeyValueStore) (*prunedfreezer, e
 
 	freezer := &prunedfreezer{
 		db:           db,
+		frozen:       offset,
 		threshold:    params.FullImmutabilityThreshold,
 		instanceLock: lock,
 		quit:         make(chan struct{}),
@@ -54,24 +55,26 @@ func newPrunedFreezer(datadir string, db ethdb.KeyValueStore) (*prunedfreezer, e
 		return nil, err
 	}
 
+	// delete ancient dir
+	if err := os.RemoveAll(datadir); err != nil && !os.IsNotExist(err) {
+		log.Warn("remove the ancient dir failed.", "path", datadir, "error", err)
+		return nil, err
+	}
 	log.Info("Opened ancientdb with nodata mode", "database", datadir, "frozen", freezer.frozen)
 	return freezer, nil
 }
 
 // repair init frozen , compatible disk-ancientdb and pruner-block-tool.
 func (f *prunedfreezer) repair(datadir string) error {
-	// compatible prune-block-tool
-	offset := ReadOffSetOfCurrentAncientFreezer(f.db)
-	log.Info("Read last offline prune-block start block number", "offset", offset)
-
+	offset := atomic.LoadUint64(&f.frozen)
 	// compatible freezer
 	min := uint64(math.MaxUint64)
-	for name, disableSnappy := range FreezerNoSnappy {
-		table, err := NewFreezerTable(datadir, name, disableSnappy, false)
+	for name, disableSnappy := range chainFreezerNoSnappy {
+		table, err := newFreezerTable(datadir, name, disableSnappy, false)
 		if err != nil {
 			return err
 		}
-		items := atomic.LoadUint64(&table.items)
+		items := table.items.Load()
 		if min > items {
 			min = items
 		}
@@ -109,7 +112,7 @@ func (f *prunedfreezer) HasAncient(kind string, number uint64) (bool, error) {
 
 // Ancient retrieves an ancient binary blob from prunedfreezer, return nil.
 func (f *prunedfreezer) Ancient(kind string, number uint64) ([]byte, error) {
-	if _, ok := FreezerNoSnappy[kind]; ok {
+	if _, ok := chainFreezerNoSnappy[kind]; ok {
 		if number >= atomic.LoadUint64(&f.frozen) {
 			return nil, errOutOfBounds
 		}
@@ -133,9 +136,25 @@ func (f *prunedfreezer) AncientOffSet() uint64 {
 	return atomic.LoadUint64(&f.frozen)
 }
 
+// MigrateTable processes the entries in a given table in sequence
+// converting them to a new format if they're of an old format.
+func (db *prunedfreezer) MigrateTable(kind string, convert convertLegacyFn) error {
+	return errNotSupported
+}
+
+// AncientDatadir returns an error as we don't have a backing chain freezer.
+func (db *prunedfreezer) AncientDatadir() (string, error) {
+	return "", errNotSupported
+}
+
+// Tail returns the number of first stored item in the freezer.
+func (f *prunedfreezer) Tail() (uint64, error) {
+	return 0, errNotSupported
+}
+
 // AncientSize returns the ancient size of the specified category, return 0.
 func (f *prunedfreezer) AncientSize(kind string) (uint64, error) {
-	if _, ok := FreezerNoSnappy[kind]; ok {
+	if _, ok := chainFreezerNoSnappy[kind]; ok {
 		return 0, nil
 	}
 	return 0, errUnknownTable
@@ -155,18 +174,25 @@ func (f *prunedfreezer) AppendAncient(number uint64, hash, header, body, receipt
 }
 
 // TruncateAncients discards any recent data above the provided threshold number, always success.
-func (f *prunedfreezer) TruncateAncients(items uint64) error {
-	if atomic.LoadUint64(&f.frozen) <= items {
-		return nil
+func (f *prunedfreezer) TruncateHead(items uint64) (uint64, error) {
+	preHead := atomic.LoadUint64(&f.frozen)
+	if preHead > items {
+		atomic.StoreUint64(&f.frozen, items)
+		WriteFrozenOfAncientFreezer(f.db, atomic.LoadUint64(&f.frozen))
 	}
-	atomic.StoreUint64(&f.frozen, items)
-	WriteFrozenOfAncientFreezer(f.db, atomic.LoadUint64(&f.frozen))
-	return nil
+	return preHead, nil
+}
+
+// TruncateTail discards any recent data below the provided threshold number.
+func (f *prunedfreezer) TruncateTail(tail uint64) (uint64, error) {
+	return 0, errNotSupported
 }
 
 // Sync flushes meta data tables to disk.
 func (f *prunedfreezer) Sync() error {
 	WriteFrozenOfAncientFreezer(f.db, atomic.LoadUint64(&f.frozen))
+	// compatible offline prune blocks tool
+	WriteOffSetOfCurrentAncientFreezer(f.db, atomic.LoadUint64(&f.frozen))
 	return nil
 }
 
@@ -286,7 +312,7 @@ func (f *prunedfreezer) freeze() {
 	}
 }
 
-func (f *prunedfreezer) ReadAncients(fn func(ethdb.AncientReader) error) (err error) {
+func (f *prunedfreezer) ReadAncients(fn func(ethdb.AncientReaderOp) error) (err error) {
 	return fn(f)
 }
 

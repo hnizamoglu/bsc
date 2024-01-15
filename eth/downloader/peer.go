@@ -58,6 +58,7 @@ type peerConnection struct {
 // LightPeer encapsulates the methods required to synchronise with a remote light peer.
 type LightPeer interface {
 	Head() (common.Hash, *big.Int)
+	MarkLagging()
 	RequestHeadersByHash(common.Hash, int, int, bool, chan *eth.Response) (*eth.Request, error)
 	RequestHeadersByNumber(uint64, int, int, bool, chan *eth.Response) (*eth.Request, error)
 }
@@ -75,6 +76,7 @@ type lightPeerWrapper struct {
 }
 
 func (w *lightPeerWrapper) Head() (common.Hash, *big.Int) { return w.peer.Head() }
+func (w *lightPeerWrapper) MarkLagging()                  { w.peer.MarkLagging() }
 func (w *lightPeerWrapper) RequestHeadersByHash(h common.Hash, amount int, skip int, reverse bool, sink chan *eth.Response) (*eth.Request, error) {
 	return w.peer.RequestHeadersByHash(h, amount, skip, reverse, sink)
 }
@@ -237,6 +239,7 @@ func (ps *peerSet) Register(p *peerConnection) error {
 	}
 	p.rates = msgrate.NewTracker(ps.rates.MeanCapacities(), ps.rates.MedianRoundTrip())
 	if err := ps.rates.Track(p.id, p.rates); err != nil {
+		ps.lock.Unlock()
 		return err
 	}
 	ps.peers[p.id] = p
@@ -294,19 +297,19 @@ func (ps *peerSet) AllPeers() []*peerConnection {
 // peerCapacitySort implements sort.Interface.
 // It sorts peer connections by capacity (descending).
 type peerCapacitySort struct {
-	p  []*peerConnection
-	tp []int
+	peers []*peerConnection
+	caps  []int
 }
 
 func (ps *peerCapacitySort) Len() int {
-	return len(ps.p)
+	return len(ps.peers)
 }
 
 func (ps *peerCapacitySort) Less(i, j int) bool {
-	return ps.tp[i] > ps.tp[j]
+	return ps.caps[i] > ps.caps[j]
 }
 
 func (ps *peerCapacitySort) Swap(i, j int) {
-	ps.p[i], ps.p[j] = ps.p[j], ps.p[i]
-	ps.tp[i], ps.tp[j] = ps.tp[j], ps.tp[i]
+	ps.peers[i], ps.peers[j] = ps.peers[j], ps.peers[i]
+	ps.caps[i], ps.caps[j] = ps.caps[j], ps.caps[i]
 }
